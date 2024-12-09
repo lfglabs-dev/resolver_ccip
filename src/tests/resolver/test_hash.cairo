@@ -1,9 +1,3 @@
-use array::ArrayTrait;
-use debug::PrintTrait;
-
-use starknet::ContractAddress;
-use starknet::testing;
-use resolver::interface::resolver::{IResolver, IResolverDispatcher, IResolverDispatcherTrait};
 use resolver::resolver::Resolver;
 use resolver::resolver::Resolver::InternalImpl;
 

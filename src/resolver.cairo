@@ -1,19 +1,17 @@
 #[starknet::contract]
-mod Resolver {
-    use core::option::OptionTrait;
-    use core::traits::TryInto;
-    use core::array::SpanTrait;
+pub mod Resolver {
+    use core::hash::HashStateTrait;
+    use core::pedersen::PedersenTrait;
+    use core::ecdsa::check_ecdsa_signature;
     use starknet::{ContractAddress, get_block_timestamp};
-    use ecdsa::check_ecdsa_signature;
-    use resolver::interface::resolver::{IResolver, IResolverDispatcher, IResolverDispatcherTrait};
-    use storage_read::{main::storage_read_component, interface::IStorageRead};
-    use openzeppelin::access::ownable::OwnableComponent;
+    use starknet::storage::{
+        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess
+    };
+    use openzeppelin_access::ownable::OwnableComponent;
+    use resolver::interface::resolver::IResolver;
 
-    component!(path: storage_read_component, storage: storage_read, event: StorageReadEvent);
     component!(path: OwnableComponent, storage: ownable, event: OwnableEvent);
 
-    #[abi(embed_v0)]
-    impl StorageReadImpl = storage_read_component::StorageRead<ContractState>;
     #[abi(embed_v0)]
     impl OwnableImpl = OwnableComponent::OwnableImpl<ContractState>;
     impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
@@ -21,9 +19,7 @@ mod Resolver {
     #[storage]
     struct Storage {
         public_key: felt252,
-        uri: LegacyMap<(felt252, felt252), felt252>,
-        #[substorage(v0)]
-        storage_read: storage_read_component::Storage,
+        uris: Map<felt252, Map<felt252, felt252>>,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
     }
@@ -32,8 +28,6 @@ mod Resolver {
     #[derive(Drop, starknet::Event)]
     enum Event {
         StarknetIDOffChainResolverUpdate: StarknetIDOffChainResolverUpdate,
-        #[flat]
-        StorageReadEvent: storage_read_component::Event,
         #[flat]
         OwnableEvent: OwnableComponent::Event,
     }
@@ -44,6 +38,7 @@ mod Resolver {
         uri_removed: Span<felt252>,
     }
 
+    const REMOVED_URI_VALUE: felt252 = 'this call was removed';
 
     #[constructor]
     fn constructor(ref self: ContractState, owner: ContractAddress, _public_key: felt252) {
@@ -51,7 +46,7 @@ mod Resolver {
         self.public_key.write(_public_key);
     }
 
-    #[external(v0)]
+    #[abi(embed_v0)]
     impl ResolverImpl of IResolver<ContractState> {
         fn resolve(
             self: @ContractState, domain: Span<felt252>, field: felt252, hint: Span<felt252>
@@ -64,15 +59,12 @@ mod Resolver {
             assert(get_block_timestamp() < max_validity.try_into().unwrap(), 'Signature expired');
 
             let hashed_domain = self.hash_domain(domain);
-            let message_hash: felt252 = hash::LegacyHash::hash(
-                hash::LegacyHash::hash(
-                    hash::LegacyHash::hash(
-                        hash::LegacyHash::hash('ccip_demo resolving', max_validity), hashed_domain
-                    ),
-                    field
-                ),
-                *hint.at(0)
-            );
+            let message_hash = PedersenTrait::new('ccip_demo resolving')
+                .update(max_validity)
+                .update(hashed_domain)
+                .update(field)
+                .update(*hint.at(0))
+                .finalize();
 
             let public_key = self.public_key.read();
             let is_valid = check_ecdsa_signature(
@@ -84,13 +76,13 @@ mod Resolver {
         }
 
         fn get_uris(self: @ContractState) -> Array<felt252> {
-            let mut res: Array<felt252> = array![];
-            let mut i: felt252 = 0;
+            let mut res = array![];
+            let mut i = 0;
             loop {
-                if self.uri.read((i, 0)) == 0 {
+                if self.uris.entry(i).entry(0).read() == 0 {
                     break;
                 }
-                if self.uri.read((i, 0)) != 'this call was removed' {
+                if self.uris.entry(i).entry(0).read() != REMOVED_URI_VALUE {
                     // we get the next uri at index i
                     let mut new_uri = self.get_uri_at_index(i);
                     res.append(new_uri.len().into());
@@ -108,17 +100,10 @@ mod Resolver {
 
         fn add_uri(ref self: ContractState, new_uri: Span<felt252>) {
             self.ownable.assert_only_owner();
-            let mut i: felt252 = 0;
+            let mut i = 0;
             loop {
-                if self.uri.read((i, 0)) == 0 {
-                    self
-                        .emit(
-                            StarknetIDOffChainResolverUpdate {
-                                uri_added: new_uri, uri_removed: array![].span()
-                            }
-                        );
+                if self.uris.entry(i).entry(0).read() == 0 {
                     self.store_uri(new_uri, i);
-
                     break;
                 }
                 i += 1;
@@ -129,17 +114,17 @@ mod Resolver {
             self.ownable.assert_only_owner();
             let uri_removed = self.get_uri_at_index(index).span();
             self.emit(StarknetIDOffChainResolverUpdate { uri_added: array![].span(), uri_removed });
-            self.uri.write((index, 0), 'this call was removed');
+            self.uris.entry(index).entry(0).write(REMOVED_URI_VALUE);
         }
     }
 
     #[generate_trait]
-    impl InternalImpl of InternalTrait {
+    pub impl InternalImpl of InternalTrait {
         fn get_uri_at_index(self: @ContractState, index: felt252) -> Array<felt252> {
             let mut res = array![];
-            let mut j: felt252 = 0;
+            let mut j = 0;
             loop {
-                let value = self.uri.read((index, j));
+                let value = self.uris.entry(index).entry(j).read();
                 if value == 0 {
                     break;
                 }
@@ -154,7 +139,7 @@ mod Resolver {
             loop {
                 match uri.pop_front() {
                     Option::Some(value) => {
-                        self.uri.write((index, j), *value);
+                        self.uris.entry(index).entry(j).write(*value);
                         j += 1;
                     },
                     Option::None => { break; }
@@ -174,27 +159,9 @@ mod Resolver {
                 }
             };
             // append uris to error array
-            self.append_uris(res)
-        }
-
-        fn append_uris(self: @ContractState, mut res: Array<felt252>) -> Array<felt252> {
-            let mut i: felt252 = 0;
-            loop {
-                if self.uri.read((i, 0)) == 0 {
-                    break;
-                }
-                if self.uri.read((i, 0)) != 'this call was removed' {
-                    // we get the next uri at index i
-                    let mut new_uri = self.get_uri_at_index(i);
-                    res.append(new_uri.len().into());
-                    loop {
-                        match new_uri.pop_front() {
-                            Option::Some(value) => { res.append(value); },
-                            Option::None => { break; }
-                        }
-                    };
-                }
-                i += 1;
+            let uris = self.get_uris();
+            for uri in uris {
+                res.append(uri);
             };
             res
         }
@@ -206,8 +173,7 @@ mod Resolver {
             let new_len = domain.len() - 1;
             let x = *domain[new_len];
             let y = self.hash_domain(domain.slice(0, new_len));
-            let hashed_domain = pedersen::pedersen(x, y);
-            return hashed_domain;
+            PedersenTrait::new(x).update(y).finalize()
         }
     }
 }

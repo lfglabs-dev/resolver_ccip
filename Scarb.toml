@@ -1,13 +1,25 @@
 [package]
 name = "resolver"
 version = "0.1.0"
+edition = "2024_07"
+cairo-version = "2.9.1"
+scarb-version = "2.9.1"
+authors = ["LFG Labs"]
+description = "Resolver CCIP"
+documentation = "https://github.com/lfglabs-dev/resolver_ccip"
+readme = "README.md"
+repository = "https://github.com/lfglabs-dev/resolver_ccip"
 
 [dependencies]
-starknet = "2.3.1"
-naming = { git = "https://github.com/starknet-id/naming.git", rev = "6e45f7fc2bc9e8e9d874a1d2c2d46e3226a96f6d" }
-openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts.git", rev = "f3e2a5f0547a429c716f32471b06df729cbdfb9f" }
-identity = { git = "https://github.com/starknet-id/identity.git", rev = "eb37846330b78e1410cf5e3e17a5dcca5652f921" }
-storage_read = { git = "https://github.com/starknet-id/storage_read_component.git", rev = "c6c69e15d34abfc39ac51dc21b96724e2e19ff31" }
+starknet = "2.9.1"
+openzeppelin_access = "0.20.0"
+openzeppelin_token = "0.20.0"
+#naming = { git = "https://github.com/starknet-id/naming.git", rev = "7fa861a7a6e56c96ba3b508c66d7587d2597385a" }
+#identity = { git = "https://github.com/starknet-id/identity.git", rev = "5ae7fafdd20abf4b1e789b83af5db7e23ad39a7c" }
+
+[dev-dependencies]
+cairo_test = "2.9.1"
+openzeppelin_utils = "0.20.0"
 
 [[target.starknet-contract]]
 # Enable Sierra codegen.

@@ -1,1 +1,1 @@
-mod resolver;
+pub mod resolver;
