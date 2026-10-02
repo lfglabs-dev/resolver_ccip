@@ -1,65 +1,76 @@
 # Resolver CCIP
 
-## Description
+A Cairo contract for CCIP (Cross-Chain Interoperability Protocol) endpoint and token management on Starknet.
 
-Resolver CCIP is a smart contract implementation in Cairo for Starknet that enables CCIP-Read (Cross-Chain Interoperability Protocol Read) functionality. This resolver allows for efficient off-chain data resolution while maintaining the security guarantees of the blockchain.
+## Cairo Version
 
-## Installation
+This project uses **Cairo 2.10.0**.
 
-1. Clone the repository
+## Dependencies
+
+- **OpenZeppelin Cairo Contracts v0.22.0**
+- **Starknet Foundry v0.38.0**
+
+## Setup
+
+### Prerequisites
+
+1. Install [Starknet Foundry](https://foundry-rs.github.io/starknet-foundry/)
+2. Install [Cairo 2.10.0](https://docs.cairo-lang.org/)
+
 ```bash
-git clone https://github.com/lfglabs-dev/resolver_ccip.git
-cd resolver_ccip
+# Install Starknet Foundry
+curl -L https://raw.githubusercontent.com/foundry-rs/starknet-foundry/master/scripts/install.sh | sh
+
+# Install Cairo 2.10.0
+curl -L https://install.cairo-lang.org/install.sh | bash
 ```
 
-2. Install Python dependencies
-```bash
-pip install -r requirements.txt
-```
+### Build
 
-3. Build Cairo contracts
 ```bash
 scarb build
 ```
 
-## Usage
+### Run Tests
 
-1. Configure your environment:
-```bash
-cp .env.example .env
-# Edit .env with your configuration
-```
-
-2. Deploy the resolver:
-To deploy the contracts:
-```bash
-python scripts/deploy.py
-```
-
-
-## Testing
-
-Run Cairo tests:
 ```bash
 scarb test
 ```
 
-For Python tests:
+## Contract Features
+
+- **Endpoint Management**: Register and deregister CCIP endpoints with URLs
+- **Token Configuration**: Set gateway fee and gas limit multipliers for tokens
+- **Contract Registry**: Track registered protocol contracts per endpoint
+- **ETH Transfer**: Transfer ETH between Ethereum addresses
+- **Access Control**: OpenZeppelin Ownable for permissioned operations
+
+## Usage
+
+### Deploy
+
 ```bash
-pytest
+# Deploy using sncast
+sncast --url http://localhost:5050 deploy --class-hash <CLASS_HASH>
 ```
 
-## Contributing
+### Interact
 
-1. Fork the repository
-2. Create your feature branch
 ```bash
-git checkout -b feature/your-feature-name
+# Register endpoint
+sncast --url http://localhost:5050 --account my_account invoke \
+  --contract-address <CONTRACT_ADDRESS> \
+  --function register_endpoint \
+  --arguments <ENDPOINT> <URL>
+
+# Register token
+sncast --url http://localhost:5050 --account my_account invoke \
+  --contract-address <CONTRACT_ADDRESS> \
+  --function register_token \
+  --arguments <TOKEN_ADDRESS> <GATEWAY_FEE_MULTIPLIER> <GAS_LIMIT_MULTIPLIER>
 ```
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
 
 ## License
 
-This project is licensed under the MIT License.
+MIT

@@ -1,213 +1,243 @@
+use starknet::{ContractAddress, eth::ethereum::EthereumAddress, crypto::get_sha256_hash, eth::transfer_eth::transfer_eth};
+use openzeppelin::access::ownable::ownable::OwnableComponent;
+
+#[starknet::interface]
+trait IResolver<T> {
+    fn register_endpoint(
+        ref self: T,
+        endpoint: eth::ethereum::EthereumAddress,
+        url: felt252,
+    );
+
+    fn deregister_endpoint(ref self: T, endpoint: eth::ethereum::EthereumAddress);
+
+    fn get_endpoint(endpoint: eth::ethereum::EthereumAddress) -> Option<felt252>;
+
+    fn get_all_endpoints() -> Array<eth::ethereum::EthereumAddress>;
+
+    fn register_token(
+        ref self: T,
+        token_address: eth::ethereum::EthereumAddress,
+        gateway_fee_limit_multiplier: u128,
+        gas_limit_multiplier: u128,
+    );
+
+    fn register_protocol_contract(
+        ref self: T,
+        endpoint: eth::ethereum::EthereumAddress,
+        contract_address: ContractAddress,
+    );
+
+    fn get_gateway_fee_limit_multiplier(token_address: eth::ethereum::EthereumAddress) -> u128;
+
+    fn get_gas_limit_multiplier(token_address: eth::ethereum::EthereumAddress) -> u128;
+
+    fn is_contract_registered(contract_address: ContractAddress) -> bool;
+
+    fn transfer_eth_to_dest(
+        ref self: T,
+        from: eth::ethereum::EthereumAddress,
+        to: eth::ethereum::EthereumAddress,
+        value: u256,
+        gateway_fee: u256,
+        extra_args: bytes31,
+    );
+}
+
 #[starknet::contract]
-mod Resolver {
-    use core::option::OptionTrait;
+contract Resolver {
     use core::traits::TryInto;
-    use core::array::SpanTrait;
-    use starknet::{ContractAddress, get_block_timestamp};
-    use ecdsa::check_ecdsa_signature;
-    use resolver::interface::resolver::{IResolver, IResolverDispatcher, IResolverDispatcherTrait};
-    use storage_read::{main::storage_read_component, interface::IStorageRead};
-    use openzeppelin::access::ownable::OwnableComponent;
-
-    component!(path: storage_read_component, storage: storage_read, event: StorageReadEvent);
-    component!(path: OwnableComponent, storage: ownable, event: OwnableEvent);
+    use core::num::traits::One;
+    use core::num::traits::Zero;
+    use openzeppelin::access::ownable::ownable::OwnableDispatcher;
+    use starknet::ContractAddress;
+    use starknet::eth::ethereum::EthereumAddress;
+    use starknet::eth::transfer_eth::transfer_eth;
+    use starknet::eth::gas_utils::get_gas_price_from_l1_bounds;
+    use starknet::eth::gas_utils::L1_GAS;
+    use starknet::eth::gas_utils::L1_GAS_PRICE;
+    use starknet::syscalls::storage_read_syscall;
+    use starknet::syscalls::StorageReadResponse;
+    use starknet::syscalls::StorageWriteSyscall;
+    use starknet::syscalls::StorageWriteResponse;
 
     #[abi(embed_v0)]
-    impl StorageReadImpl = storage_read_component::StorageRead<ContractState>;
-    #[abi(embed_v0)]
-    impl OwnableImpl = OwnableComponent::OwnableImpl<ContractState>;
-    impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
+    pub ownable: OwnableComponent<ContractState>;
 
     #[storage]
     struct Storage {
-        public_key: felt252,
-        uri: LegacyMap<(felt252, felt252), felt252>,
-        #[substorage(v0)]
-        storage_read: storage_read_component::Storage,
-        #[substorage(v0)]
-        ownable: OwnableComponent::Storage,
+        endpoints: HashMap<EthereumAddress, felt252>,
+        token_to_gateway_fee_limit_multiplier: HashMap<EthereumAddress, u128>,
+        token_to_gas_limit_multiplier: HashMap<EthereumAddress, u128>,
+        registered_contracts: HashSet<ContractAddress>,
+        protocol_contracts: HashMap<EthereumAddress, ContractAddress>,
     }
 
     #[event]
     #[derive(Drop, starknet::Event)]
     enum Event {
-        StarknetIDOffChainResolverUpdate: StarknetIDOffChainResolverUpdate,
-        #[flat]
-        StorageReadEvent: storage_read_component::Event,
-        #[flat]
-        OwnableEvent: OwnableComponent::Event,
+        EndpointRegistered: EndpointRegistered,
+        EndpointDeregistered: EndpointDeregistered,
+        TokenRegistered: TokenRegistered,
+        ContractRegistered: ContractRegistered,
+        EthTransferred: EthTransferred,
+        OwnershipTransferred: ownership::transfer_ownership::OwnershipTransferred,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct StarknetIDOffChainResolverUpdate {
-        uri_added: Span<felt252>,
-        uri_removed: Span<felt252>,
+    struct EndpointRegistered {
+        endpoint: EthereumAddress,
+        url: felt252,
     }
 
+    #[derive(Drop, starknet::Event)]
+    struct EndpointDeregistered {
+        endpoint: EthereumAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct TokenRegistered {
+        token_address: EthereumAddress,
+        gateway_fee_limit_multiplier: u128,
+        gas_limit_multiplier: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct ContractRegistered {
+        endpoint: EthereumAddress,
+        contract_address: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct EthTransferred {
+        from: EthereumAddress,
+        to: EthereumAddress,
+        value: u256,
+        gateway_fee: u256,
+        extra_args: bytes31,
+    }
 
     #[constructor]
-    fn constructor(ref self: ContractState, owner: ContractAddress, _public_key: felt252) {
+    fn constructor(ref self: ContractState) {
+        let owner = starknet::contract_address_from_bytes31(starknet::msg_sender().try_into().unwrap());
         self.ownable.initializer(owner);
-        self.public_key.write(_public_key);
+    }
+
+    #[abi(embed_v0)]
+    impl OwnableImpl = OwnableComponent<ContractState>;
+
+    #[external(v0)]
+    fn register_endpoint(
+        ref self: ContractState,
+        endpoint: EthereumAddress,
+        url: felt252,
+    ) {
+        require(
+            self.ownable.owner() == starknet::msg_sender(),
+            'OnlyOwner',
+        );
+        self.endpoints.insert(endpoint, url);
+        emit EndpointRegistered { endpoint, url };
     }
 
     #[external(v0)]
-    impl ResolverImpl of IResolver<ContractState> {
-        fn resolve(
-            self: @ContractState, domain: Span<felt252>, field: felt252, hint: Span<felt252>
-        ) -> felt252 {
-            if hint.len() != 4 {
-                panic(self.get_error_array(array!['offchain_resolving'], domain));
-            }
-
-            let max_validity = *hint.at(3);
-            assert(get_block_timestamp() < max_validity.try_into().unwrap(), 'Signature expired');
-
-            let hashed_domain = self.hash_domain(domain);
-            let message_hash: felt252 = hash::LegacyHash::hash(
-                hash::LegacyHash::hash(
-                    hash::LegacyHash::hash(
-                        hash::LegacyHash::hash('ccip_demo resolving', max_validity), hashed_domain
-                    ),
-                    field
-                ),
-                *hint.at(0)
-            );
-
-            let public_key = self.public_key.read();
-            let is_valid = check_ecdsa_signature(
-                message_hash, public_key, *hint.at(1), *hint.at(2)
-            );
-            assert(is_valid, 'Invalid signature');
-
-            return *hint.at(0);
-        }
-
-        fn get_uris(self: @ContractState) -> Array<felt252> {
-            let mut res: Array<felt252> = array![];
-            let mut i: felt252 = 0;
-            loop {
-                if self.uri.read((i, 0)) == 0 {
-                    break;
-                }
-                if self.uri.read((i, 0)) != 'this call was removed' {
-                    // we get the next uri at index i
-                    let mut new_uri = self.get_uri_at_index(i);
-                    res.append(new_uri.len().into());
-                    loop {
-                        match new_uri.pop_front() {
-                            Option::Some(value) => { res.append(value); },
-                            Option::None => { break; }
-                        }
-                    };
-                }
-                i += 1;
-            };
-            res
-        }
-
-        fn add_uri(ref self: ContractState, new_uri: Span<felt252>) {
-            self.ownable.assert_only_owner();
-            let mut i: felt252 = 0;
-            loop {
-                if self.uri.read((i, 0)) == 0 {
-                    self
-                        .emit(
-                            StarknetIDOffChainResolverUpdate {
-                                uri_added: new_uri, uri_removed: array![].span()
-                            }
-                        );
-                    self.store_uri(new_uri, i);
-
-                    break;
-                }
-                i += 1;
-            };
-        }
-
-        fn remove_uri(ref self: ContractState, index: felt252) {
-            self.ownable.assert_only_owner();
-            let uri_removed = self.get_uri_at_index(index).span();
-            self.emit(StarknetIDOffChainResolverUpdate { uri_added: array![].span(), uri_removed });
-            self.uri.write((index, 0), 'this call was removed');
-        }
+    fn deregister_endpoint(
+        ref self: ContractState,
+        endpoint: EthereumAddress,
+    ) {
+        require(
+            self.ownable.owner() == starknet::msg_sender(),
+            'OnlyOwner',
+        );
+        assert(self.endpoints.contains(endpoint), 'Endpoint not registered');
+        self.endpoints.remove(endpoint);
+        emit EndpointDeregistered { endpoint };
     }
 
-    #[generate_trait]
-    impl InternalImpl of InternalTrait {
-        fn get_uri_at_index(self: @ContractState, index: felt252) -> Array<felt252> {
-            let mut res = array![];
-            let mut j: felt252 = 0;
-            loop {
-                let value = self.uri.read((index, j));
-                if value == 0 {
-                    break;
-                }
-                res.append(value);
-                j += 1;
-            };
-            res
-        }
+    #[external(v0)]
+    fn get_endpoint(endpoint: EthereumAddress) -> Option<felt252> {
+        return self.endpoints.try_get(endpoint).into();
+    }
 
-        fn store_uri(ref self: ContractState, mut uri: Span<felt252>, index: felt252) {
-            let mut j = 0;
-            loop {
-                match uri.pop_front() {
-                    Option::Some(value) => {
-                        self.uri.write((index, j), *value);
-                        j += 1;
-                    },
-                    Option::None => { break; }
-                }
-            };
+    #[external(v0)]
+    fn get_all_endpoints() -> Array<EthereumAddress> {
+        let mut endpoints: Array<EthereumAddress> = array![];
+        for endpoint in self.endpoints.iter() {
+            endpoints.append(*endpoint);
         }
+        endpoints
+    }
 
-        fn get_error_array(
-            self: @ContractState, mut res: Array<felt252>, mut domain: Span<felt252>
-        ) -> Array<felt252> {
-            // append domain to error array
-            res.append(domain.len().into());
-            loop {
-                match domain.pop_front() {
-                    Option::Some(value) => { res.append(*value); },
-                    Option::None => { break; }
-                }
-            };
-            // append uris to error array
-            self.append_uris(res)
-        }
+    #[external(v0)]
+    fn register_token(
+        ref self: ContractState,
+        token_address: EthereumAddress,
+        gateway_fee_limit_multiplier: u128,
+        gas_limit_multiplier: u128,
+    ) {
+        require(
+            self.ownable.owner() == starknet::msg_sender(),
+            'OnlyOwner',
+        );
+        self.token_to_gateway_fee_limit_multiplier.insert(token_address, gateway_fee_limit_multiplier);
+        self.token_to_gas_limit_multiplier.insert(token_address, gas_limit_multiplier);
+        emit TokenRegistered {
+            token_address,
+            gateway_fee_limit_multiplier,
+            gas_limit_multiplier,
+        };
+    }
 
-        fn append_uris(self: @ContractState, mut res: Array<felt252>) -> Array<felt252> {
-            let mut i: felt252 = 0;
-            loop {
-                if self.uri.read((i, 0)) == 0 {
-                    break;
-                }
-                if self.uri.read((i, 0)) != 'this call was removed' {
-                    // we get the next uri at index i
-                    let mut new_uri = self.get_uri_at_index(i);
-                    res.append(new_uri.len().into());
-                    loop {
-                        match new_uri.pop_front() {
-                            Option::Some(value) => { res.append(value); },
-                            Option::None => { break; }
-                        }
-                    };
-                }
-                i += 1;
-            };
-            res
-        }
+    #[external(v0)]
+    fn register_protocol_contract(
+        ref self: ContractState,
+        endpoint: EthereumAddress,
+        contract_address: ContractAddress,
+    ) {
+        require(
+            self.ownable.owner() == starknet::msg_sender(),
+            'OnlyOwner',
+        );
+        self.protocol_contracts.insert(endpoint, contract_address);
+        self.registered_contracts.insert(contract_address);
+        emit ContractRegistered { endpoint, contract_address };
+    }
 
-        fn hash_domain(self: @ContractState, domain: Span<felt252>) -> felt252 {
-            if domain.len() == 0 {
-                return 0;
-            };
-            let new_len = domain.len() - 1;
-            let x = *domain[new_len];
-            let y = self.hash_domain(domain.slice(0, new_len));
-            let hashed_domain = pedersen::pedersen(x, y);
-            return hashed_domain;
-        }
+    #[external(v0)]
+    fn get_gateway_fee_limit_multiplier(token_address: EthereumAddress) -> u128 {
+        return *self.token_to_gateway_fee_limit_multiplier.try_get(token_address).unwrap();
+    }
+
+    #[external(v0)]
+    fn get_gas_limit_multiplier(token_address: EthereumAddress) -> u128 {
+        return *self.token_to_gas_limit_multiplier.try_get(token_address).unwrap();
+    }
+
+    #[external(v0)]
+    fn is_contract_registered(contract_address: ContractAddress) -> bool {
+        return self.registered_contracts.contains(contract_address);
+    }
+
+    #[external(v0)]
+    fn transfer_eth_to_dest(
+        ref self: ContractState,
+        from: EthereumAddress,
+        to: EthereumAddress,
+        value: u256,
+        gateway_fee: u256,
+        extra_args: bytes31,
+    ) {
+        require(
+            self.registered_contracts.contains(starknet::contract_address_from_bytes31(starknet::msg_sender().try_into().unwrap())),
+            'Not a registered contract',
+        );
+        transfer_eth(
+            from,
+            to,
+            value,
+            gateway_fee,
+            extra_args,
+        );
+        emit EthTransferred { from, to, value, gateway_fee, extra_args };
     }
 }
