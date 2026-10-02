@@ -1,25 +1,25 @@
-name: CI Tests
+name: Test
 
-on: [push, pull_request, pull_request_target]
-
-env:
-  SCARB_VERSION: 2.3.1
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  scarb-tests:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Install scarb
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://docs.swmansion.com/scarb/install.sh | sh -s -- -v $SCARB_VERSION
-
-      - name: Install project dependencies
-        run: scarb fetch
-
-      - name: Compile smart contracts
-        run: scarb build
-
-      - name: Run scarb tests
-        run: scarb test -p resolver
+      - uses: actions/checkout@v4
+      
+      - name: Install Starknet Foundry
+        run: curl -L https://raw.githubusercontent.com/foundry-rs/starknet-foundry/master/scripts/install.sh | sh
+      
+      - name: Add to PATH
+        run: echo "$HOME/.starknet-foundry/bin" >> $GITHUB_PATH
+      
+      - name: Install Cairo 2.10.0
+        run: curl -L https://install.cairo-lang.org/install.sh | bash
+        
+      - name: Run tests
+        run: snforge test
